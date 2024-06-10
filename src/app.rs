@@ -26,7 +26,7 @@ impl eframe::App for App {
                 ui.add(label);
             }
             if ui.add_enabled(self.view_proc.is_none(),egui::Button::new("Click me")).clicked() {
-                self.text = "PIPISISI".to_string();
+                self.text = "Second window started".to_string();
                 self.view_proc = Some(
                     std::process::Command::new(std::env::current_exe().unwrap())
                         .stdin(Stdio::piped())

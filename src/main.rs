@@ -20,7 +20,7 @@ fn main() {
     let app= get_current_app(std::env::args().len());
     let param = app;
     eframe::run_native(
-        "pipi und kaki",
+        "Racoon Camera",
         options,
         Box::new(|_cc| param),
     )
