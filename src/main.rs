@@ -1,4 +1,3 @@
-use std::env::Args;
 use nokhwa::*;
 
 use app::App;
