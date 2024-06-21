@@ -1,22 +1,23 @@
-use std::*;
 use eframe::{
     self,
-    egui::{Color32, Pos2, Rect},
+    egui::{Color32, Image, Pos2, Rect, Rgba, Vec2},
 };
+use std::f32::consts::PI;
 
 use nokhwa::{
     self,
-    pixel_format::RgbFormat,
+    pixel_format::{RgbAFormat, RgbFormat},
     utils::{RequestedFormat, RequestedFormatType},
     Camera,
 };
 use rand::{random, Rng};
+use image;
 
 pub struct ViewApp {
     camera: nokhwa::Camera,
-    mycamera: virtualcam_rs::Camera,
-    data: Vec<u8>,
-    rotate: f32,
+    my_camera: virtualcam_rs::Camera,
+    rotate:f32,
+    rotateD:f32,
     r: u8,
     g: u8,
     b: u8,
@@ -30,35 +31,49 @@ impl Default for ViewApp {
                 RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
             )
             .unwrap(),
-            data: Vec::new(),
-            rotate: 0.,
-            mycamera: virtualcam_rs::Camera::new(1280, 720, "Unity Video Capture").unwrap(),
+            my_camera: virtualcam_rs::Camera::new(1280, 720, "Unity Video Capture").unwrap(),
             r: 0,
             g: 0,
             b: 0,
+            rotate: 0.0,
+            rotateD: 0.0,
         }
     }
 }
 
 impl ViewApp {
-    fn get_camera_image(&mut self) -> eframe::egui::ColorImage {
+    fn set_camera_image(&mut self) {
         let frame = self.camera.frame().unwrap();
-        let size = frame.resolution().width() * frame.resolution().height() * 3;
-        if self.data.is_empty() {
-            self.data.reserve_exact(size as usize);
-            for _ in 0..size {
-                self.data.push(0);
+
+        let image = frame.decode_image::<RgbAFormat>().unwrap();
+        let radius: i32 = image.height() as i32 / 2;
+        let (cx, cy) = (image.width() as i32 / 2, image.height() as i32 / 2);
+
+        let mut image = imageproc::geometric_transformations::rotate_about_center(
+            &image, 
+            self.rotate,  
+            imageproc::geometric_transformations::Interpolation::Nearest, 
+            image::Rgba([0, 0, 0, 255]));
+
+        for x in 0..image.width() {
+            for y in 0..image.height() {
+                let dx = x as i32 - cx;
+                let dy = y as i32 - cy;
+                if dx * dx + dy * dy >= radius * radius {
+                    image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+                }
             }
         }
-        frame.decode_image_to_buffer::<RgbFormat>(&mut self.data).unwrap();
-
-        eframe::egui::ColorImage::from_rgb(
-            [
-                frame.resolution().width() as usize,
-                frame.resolution().height() as usize,
-            ],
-            &self.data,
-        )
+        let mut pixels = Vec::new();
+        for pixel in image.pixels().clone() {
+            pixels.push(pixel.0[3]);
+            pixels.push(pixel.0[2].max(self.b));
+            pixels.push(pixel.0[1].max(self.g));
+            pixels.push(pixel.0[0].max(self.r));
+        }
+        pixels.reverse();
+        let _ = self.my_camera.send(pixels);
+        self.rotate += self.rotateD;
     }
 }
 
@@ -66,7 +81,7 @@ impl eframe::App for ViewApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let img = self.get_camera_image();
+            self.set_camera_image();
             let slr = eframe::egui::Slider::new(&mut self.r, 0..=255)
                 .text("r")
                 .text_color(Color32::RED);
@@ -76,36 +91,12 @@ impl eframe::App for ViewApp {
             let slb = eframe::egui::Slider::new(&mut self.b, 0..=255)
                 .text("b")
                 .text_color(Color32::BLUE);
+            let slspeed = eframe::egui::Slider::new(&mut self.rotateD, -1.0..=1.0)
+                .text("speed");
             ui.add(slr);
             ui.add(slg);
             ui.add(slb);
-            let mut pixels = Vec::new();
-            for pixel in img.pixels.clone() {
-                    pixels.push(pixel.a());
-                    pixels.push(pixel.b().max(self.b));
-                    pixels.push(pixel.g().max(self.g));
-                    pixels.push(pixel.r().max(self.r));
-            }
-            pixels.reverse();
-
-            let res = self.mycamera.send(pixels.clone());
-            match res {
-                Ok(_) => print!(""),
-                Err(_e) => println!("nok"),
-            }
-            // let tex = ui
-            //     .ctx()
-            //     .load_texture("frame", img, eframe::egui::TextureOptions::LINEAR);
-            // let rect = eframe::egui::Rect::from_center_size(
-            //     eframe::egui::Pos2::new(350., 350.),
-            //     eframe::egui::Vec2::new(400., 400.),
-            // );
-            // // rect.rotate_bb(Rot2::from_angle(0.));
-            // // let rot = ViewApp::get_sized_rect(rect, self.rotate);
-            // eframe::egui::Image::new(&tex)
-            //     //.rotate(self.rotate, eframe::egui::Vec2::splat(0.5))
-            //     .paint_at(ui, rect);
-            // self.rotate += 0.07;
+            ui.add(slspeed);
         });
     }
 }
