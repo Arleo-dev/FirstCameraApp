@@ -11,13 +11,13 @@ use nokhwa::{
     Camera,
 };
 use rand::{random, Rng};
-use image;
+use image::{self, GenericImageView, ImageBuffer, Pixel};
 
 pub struct ViewApp {
     camera: nokhwa::Camera,
     my_camera: virtualcam_rs::Camera,
     rotate:f32,
-    rotateD:f32,
+    rotate_delta:f32,
     r: u8,
     g: u8,
     b: u8,
@@ -36,7 +36,8 @@ impl Default for ViewApp {
             g: 0,
             b: 0,
             rotate: 0.0,
-            rotateD: 0.0,
+            rotate_delta: 0.0,
+
         }
     }
 }
@@ -45,7 +46,7 @@ impl ViewApp {
     fn set_camera_image(&mut self) {
         let frame = self.camera.frame().unwrap();
 
-        let image = frame.decode_image::<RgbAFormat>().unwrap();
+        let image: ImageBuffer<image::Rgba<u8>, Vec<u8>> = frame.decode_image::<RgbAFormat>().unwrap();
         let radius: i32 = image.height() as i32 / 2;
         let (cx, cy) = (image.width() as i32 / 2, image.height() as i32 / 2);
 
@@ -64,16 +65,24 @@ impl ViewApp {
                 }
             }
         }
+        
+        let pixels = self.get_dat_from_img(image);
+
+        let _ = self.my_camera.send(pixels);
+        self.rotate += self.rotate_delta;
+    }
+
+    fn get_dat_from_img(&mut self, img: ImageBuffer<image::Rgba<u8>, Vec<u8>>) -> Vec<u8>{
         let mut pixels = Vec::new();
-        for pixel in image.pixels().clone() {
-            pixels.push(pixel.0[3]);
-            pixels.push(pixel.0[2].max(self.b));
-            pixels.push(pixel.0[1].max(self.g));
-            pixels.push(pixel.0[0].max(self.r));
+        for pixel in img.pixels().clone() {
+            let p = *pixel;
+            pixels.push(p.0[3]);
+            pixels.push(p.0[2].max(self.b));
+            pixels.push(p.0[1].max(self.g));
+            pixels.push(p.0[0].max(self.r));
         }
         pixels.reverse();
-        let _ = self.my_camera.send(pixels);
-        self.rotate += self.rotateD;
+        return  pixels;
     }
 }
 
@@ -91,12 +100,20 @@ impl eframe::App for ViewApp {
             let slb = eframe::egui::Slider::new(&mut self.b, 0..=255)
                 .text("b")
                 .text_color(Color32::BLUE);
-            let slspeed = eframe::egui::Slider::new(&mut self.rotateD, -1.0..=1.0)
+            let slspeed = eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0)
                 .text("speed");
             ui.add(slr);
             ui.add(slg);
             ui.add(slb);
             ui.add(slspeed);
         });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let path = std::env::current_dir().unwrap();
+        let path = format!("{}/resources/on_exit_img.jpg", path.display());
+        let img = image::open(path).unwrap().into_rgba8();
+        let pixels = self.get_dat_from_img(img);
+        let _ = self.my_camera.send(pixels);
     }
 }
