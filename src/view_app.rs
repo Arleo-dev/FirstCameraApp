@@ -4,7 +4,12 @@ use eframe::{
 };
 use imageproc::drawing::Canvas;
 use std::{
-    sync::{Arc, Mutex},
+    f64::NAN,
+    ptr::null,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, Mutex,
+    },
     thread,
 };
 
@@ -23,15 +28,36 @@ pub struct ViewApp {
     rotate: f32,
     rotate_delta: f32,
     rgb: image::Rgb<u8>,
-    disco_rgb: Arc<Mutex<image::Rgb<u8>>>,
+    disco_rgb: Receiver<image::Rgb<u8>>,
+    current_disco_rgb: image::Rgb<u8>,
     is_racoon: bool,
     is_disco: bool,
-    is_start: bool,
     timeout: u64,
+    timeout_sender: Sender<u64>,
 }
 
 impl Default for ViewApp {
     fn default() -> Self {
+        let (data, receive) = mpsc::channel();
+        let disco_rgb = receive;
+        let timeout = 300;
+        let (timeout_sender, receive) = mpsc::channel();
+        thread::spawn(move || {
+            let mut timeout = timeout;
+            let mut rng_thread = rand::thread_rng();
+            loop {
+                if let Ok(time) = receive.try_recv() {
+                    timeout = time;
+                }
+                    let mut rgb = image::Rgb([0, 0, 0]);
+                    rgb.0[0] = rng_thread.gen_range(10..=200);
+                    rgb.0[1] = rng_thread.gen_range(10..=200);
+                    rgb.0[2] = rng_thread.gen_range(10..=200);
+                    let _ = data.send(rgb);
+                thread::sleep(std::time::Duration::from_millis(timeout));
+            }
+        });
+
         Self {
             camera: Camera::new(
                 nokhwa::utils::CameraIndex::Index(0),
@@ -40,34 +66,25 @@ impl Default for ViewApp {
             .unwrap(),
             my_camera: virtualcam_rs::Camera::new(1280, 720, "Unity Video Capture").unwrap(),
             rgb: image::Rgb([0, 0, 0]),
-            disco_rgb: Mutex::new(image::Rgb([0, 0, 0])).into(),
+            disco_rgb,
+            current_disco_rgb: image::Rgb([0,0,0]),
             rotate: 0.0,
             rotate_delta: 0.0,
             is_racoon: false,
             is_disco: false,
-            is_start: true,
-            timeout: 0,
+            timeout,
+            timeout_sender,
         }
     }
 }
 
 impl ViewApp {
-    fn update_disco_value(&mut self) {
-        let data = Arc::new(Mutex::new(image::Rgb([0, 0, 0])));
-        self.disco_rgb = data.clone();
-        thread::spawn(move || loop {
-            let mut rgb = data.lock().unwrap();
-            rgb.0[0] = rand::thread_rng().gen_range(10..=200);
-            rgb.0[1] = rand::thread_rng().gen_range(10..=200);
-            rgb.0[2] = rand::thread_rng().gen_range(10..=200);
-            drop(rgb);
-            thread::sleep(std::time::Duration::from_millis(300));
-        });
-    }
-
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
         let rgb = if self.is_disco {
-            self.disco_rgb.lock().unwrap().clone()
+            if let Ok(rgb) = self.disco_rgb.try_recv() {
+                self.current_disco_rgb= rgb;
+            }
+            self.current_disco_rgb
         } else {
             self.rgb
         };
@@ -153,10 +170,6 @@ impl ViewApp {
 impl eframe::App for ViewApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
-        if self.is_start {
-            self.update_disco_value();
-            self.is_start = false;
-        }
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             self.set_camera_image();
             let mut r = self.rgb.channels_mut()[0];
@@ -186,7 +199,9 @@ impl eframe::App for ViewApp {
             }
             ui.add(disco_cb);
             if self.is_disco {
-                ui.add(sl_update_speed);
+                if ui.add(sl_update_speed).changed() {
+                    let _ = self.timeout_sender.send(self.timeout);
+                }
             }
             self.rgb.channels_mut()[0] = r;
             self.rgb.channels_mut()[1] = g;
