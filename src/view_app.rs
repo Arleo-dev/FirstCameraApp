@@ -24,7 +24,7 @@ use rand::{random, Rng};
 
 pub struct ViewApp {
     camera: nokhwa::Camera,
-    my_camera: virtualcam_rs::Camera,
+    virtual_camera: virtualcam_rs::Camera,
     rotate: f32,
     rotate_delta: f32,
     rgb: image::Rgb<u8>,
@@ -34,6 +34,7 @@ pub struct ViewApp {
     is_disco: bool,
     timeout: u64,
     timeout_sender: Sender<u64>,
+    image_pixels: Vec<u8>,
 }
 
 impl Default for ViewApp {
@@ -57,14 +58,14 @@ impl Default for ViewApp {
                 thread::sleep(std::time::Duration::from_millis(timeout));
             }
         });
-
+        let camera = Camera::new(
+            nokhwa::utils::CameraIndex::Index(0),
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+        ).unwrap();
+        
         Self {
-            camera: Camera::new(
-                nokhwa::utils::CameraIndex::Index(0),
-                RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-            )
-            .unwrap(),
-            my_camera: virtualcam_rs::Camera::new(1280, 720, "Unity Video Capture").unwrap(),
+            virtual_camera: virtualcam_rs::Camera::new(camera.resolution().width() as i32, camera.resolution().height() as i32, "Unity Video Capture").unwrap(),
+            camera: camera,
             rgb: image::Rgb([0, 0, 0]),
             disco_rgb,
             current_disco_rgb: image::Rgb([0,0,0]),
@@ -74,6 +75,7 @@ impl Default for ViewApp {
             is_disco: false,
             timeout,
             timeout_sender,
+            image_pixels: Vec::new(),
         }
     }
 }
@@ -150,7 +152,7 @@ impl ViewApp {
 
         let pixels = self.get_pixels_from_img(image);
 
-        let _ = self.my_camera.send(pixels);
+        let _ = self.virtual_camera.send(pixels);
     }
 
     fn get_pixels_from_img(&mut self, img: ImageBuffer<image::Rgba<u8>, Vec<u8>>) -> Vec<u8> {
@@ -163,7 +165,7 @@ impl ViewApp {
             pixels.push(p.0[0]);
         }
         pixels.reverse();
-        return pixels;
+        pixels
     }
 }
 
@@ -203,6 +205,7 @@ impl eframe::App for ViewApp {
                     let _ = self.timeout_sender.send(self.timeout);
                 }
             }
+
             self.rgb.channels_mut()[0] = r;
             self.rgb.channels_mut()[1] = g;
             self.rgb.channels_mut()[2] = b;
@@ -214,6 +217,6 @@ impl eframe::App for ViewApp {
         let path = format!("{}/resources/on_exit_img.jpg", path.display());
         let img = image::open(path).unwrap().into_rgba8();
         let pixels = self.get_pixels_from_img(img);
-        let _ = self.my_camera.send(pixels);
+        let _ = self.virtual_camera.send(pixels);
     }
 }
