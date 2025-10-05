@@ -1,40 +1,45 @@
-use eframe::{
+use eframe::{self, egui::Color32};
+use image::{
     self,
-    egui::{Color32, Image, Pos2, Rect, Rgba, Vec2},
+    imageops::{crop_imm, resize, FilterType},
+    ImageBuffer, Pixel, Rgba,
 };
-use imageproc::drawing::Canvas;
 use std::{
-    f64::NAN,
-    ptr::null,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     thread,
 };
-
-use image::{self, GenericImageView, ImageBuffer, Pixel};
+use onnxruntime::ndarray::*;
+use onnxruntime::{
+    environment::Environment, session::Session, GraphOptimizationLevel, LoggingLevel,
+};
 use nokhwa::{
     self,
     pixel_format::{RgbAFormat, RgbFormat},
     utils::{RequestedFormat, RequestedFormatType},
     Camera,
 };
-use rand::{random, Rng};
+use rand::Rng;
+
+const MAX_ZOOM_FACROT: f32 = 10f32;
+const CONFIDENCE_THRESHOLD: f32 = 0.55;
 
 pub struct ViewApp {
     camera: nokhwa::Camera,
     virtual_camera: virtualcam_rs::Camera,
     rotate: f32,
+    zoom_factor: f32,
     rotate_delta: f32,
     rgb: image::Rgb<u8>,
     disco_rgb: Receiver<image::Rgb<u8>>,
     current_disco_rgb: image::Rgb<u8>,
     is_racoon: bool,
     is_disco: bool,
+    is_zoom: bool,
     timeout: u64,
     timeout_sender: Sender<u64>,
     image_pixels: Vec<u8>,
+    ort_env: &'static Environment,
+    ort_session: Session<'static>,
 }
 
 impl Default for ViewApp {
@@ -50,41 +55,152 @@ impl Default for ViewApp {
                 if let Ok(time) = receive.try_recv() {
                     timeout = time;
                 }
-                    let mut rgb = image::Rgb([0, 0, 0]);
-                    rgb.0[0] = rng_thread.gen_range(10..=200);
-                    rgb.0[1] = rng_thread.gen_range(10..=200);
-                    rgb.0[2] = rng_thread.gen_range(10..=200);
-                    let _ = data.send(rgb);
+                let mut rgb = image::Rgb([0, 0, 0]);
+                rgb.0[0] = rng_thread.gen_range(10..=200);
+                rgb.0[1] = rng_thread.gen_range(10..=200);
+                rgb.0[2] = rng_thread.gen_range(10..=200);
+                let _ = data.send(rgb);
                 thread::sleep(std::time::Duration::from_millis(timeout));
             }
         });
         let camera = Camera::new(
             nokhwa::utils::CameraIndex::Index(0),
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
+        let path = std::env::current_dir().unwrap();
+        let path = format!("{}/resources/version-RFB-640.onnx", path.display());
+        let env = Box::new(
+            Environment::builder()
+                .with_name("face_detection")
+                .with_log_level(LoggingLevel::Warning)
+                .build()
+                .expect("Failed to create ONNX environment"),
+        );
+        let ort_env: &'static Environment = Box::leak(env);
+
+        let session_builder = ort_env
+            .new_session_builder()
+            .expect("Failed to create session builder");
+
+        let ort_session = session_builder
+            .with_optimization_level(GraphOptimizationLevel::All)
+            .expect("Failed to set optimization level")
+            .with_model_from_file(path)
+            .expect("Failed to load ONNX model");
+
         Self {
-            virtual_camera: virtualcam_rs::Camera::new(camera.resolution().width() as i32, camera.resolution().height() as i32, "Unity Video Capture").unwrap(),
+            virtual_camera: virtualcam_rs::Camera::new(
+                camera.resolution().width() as i32,
+                camera.resolution().height() as i32,
+                "Unity Video Capture",
+            )
+            .unwrap(),
             camera: camera,
             rgb: image::Rgb([0, 0, 0]),
             disco_rgb,
-            current_disco_rgb: image::Rgb([0,0,0]),
+            current_disco_rgb: image::Rgb([0, 0, 0]),
             rotate: 0.0,
+            zoom_factor: 1.0,
             rotate_delta: 0.0,
             is_racoon: false,
             is_disco: false,
+            is_zoom: false,
             timeout,
             timeout_sender,
             image_pixels: Vec::new(),
+            ort_env,
+            ort_session,
         }
     }
 }
 
 impl ViewApp {
+    fn get_zoomed_face(
+        &mut self,
+        mut frame: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    ) -> ImageBuffer<image::Rgba<u8>, Vec<u8>> {
+        let orig_w = frame.width();
+        let orig_h = frame.height();
+
+        let model_h = 480;
+        let model_w = 640;
+        let resized = image::imageops::resize(&frame, model_w, model_h, FilterType::Triangle);
+
+        let mut tensor = Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
+        for (x, y, pixel) in resized.enumerate_pixels() {
+            tensor[[0, 0, y as usize, x as usize]] =  pixel[0] as f32 / 255.0;
+            tensor[[0, 1, y as usize, x as usize]] = pixel[1] as f32 / 255.0;
+            tensor[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
+        }
+
+        let outputs = match self.ort_session.run(vec![tensor]) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("❌ ONNX inference failed: {:?}", e);
+                return frame;
+            }
+        };
+
+        let scores_array: ArrayD<f32> = outputs[0].to_owned();
+        let boxes_array: ArrayD<f32> = outputs[1].to_owned();
+
+        let scores_view = scores_array.view();
+        let boxes_view = boxes_array.view();
+
+        let scores_slice = scores_view.index_axis(Axis(0), 0);
+
+        let (i, score) = scores_slice
+            .axis_iter(Axis(0))
+            .enumerate()
+            .max_by(|(_, x), (_, y)| x[1].partial_cmp(&y[1]).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+        let face_score = score[1];
+        if face_score > CONFIDENCE_THRESHOLD {
+            let boxes_batch = boxes_view.index_axis(Axis(0), 0);
+            let box_coords = boxes_batch.index_axis(Axis(0), i);
+
+            let x_min_norm = box_coords[0];
+            let y_min_norm = box_coords[1];
+            let x_max_norm = box_coords[2];
+            let y_max_norm = box_coords[3];
+
+            let mut x = (x_min_norm * orig_w as f32) as i32;
+            let mut y = (y_min_norm * orig_h as f32) as i32;
+            let mut w = ((x_max_norm - x_min_norm) * orig_w as f32) as u32;
+            let mut h = ((y_max_norm - y_min_norm) * orig_h as f32) as u32;
+            let delta_y = (orig_h - h) / 2;
+            let delta_x = (orig_w - w) / 2;
+
+            let cx = x as f32 + w as f32 / 2.0;
+            let cy = y as f32 + h as f32 / 2.0;
+
+            let zoom = MAX_ZOOM_FACROT / (self.zoom_factor * 4f32);
+            w = (((w + delta_x) as f32) * zoom) as u32;
+            h = (((h + delta_y) as f32) * zoom) as u32;
+
+            x = (cx - w as f32 / 2.0).round() as i32;
+            y = (cy - h as f32 / 2.0).round() as i32;
+
+            let x = x.max(0) as u32;
+            let y = y.max(0) as u32;
+            let w = w.min(orig_w - x);
+            let h = h.min(orig_h - y);
+            // FOR DEBUG
+            // let rect = Rect::at(x as i32, y as i32).of_size(w, h);
+            // draw_hollow_rect_mut(&mut frame, rect, Rgba([0, 255, 0, 255]));
+
+            let cropped_face = crop_imm(&frame, x as u32, y as u32, w, h).to_image();
+            frame = resize(&cropped_face, orig_w, orig_h, FilterType::Triangle);
+        }
+        frame
+    }
+
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
         let rgb = if self.is_disco {
             if let Ok(rgb) = self.disco_rgb.try_recv() {
-                self.current_disco_rgb= rgb;
+                self.current_disco_rgb = rgb;
             }
             self.current_disco_rgb
         } else {
@@ -144,6 +260,10 @@ impl ViewApp {
         let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
             frame.decode_image::<RgbAFormat>().unwrap();
 
+        if self.is_zoom {
+            image = self.get_zoomed_face(image);
+        };
+
         image = if self.is_racoon {
             self.get_racoon_style_image(image)
         } else {
@@ -190,6 +310,9 @@ impl eframe::App for ViewApp {
             let sl_speed =
                 eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0).text("speed");
             let disco_cb = eframe::egui::Checkbox::new(&mut self.is_disco, "On Disco");
+            let zoom_cb = eframe::egui::Checkbox::new(&mut self.is_zoom, "On Zoom");
+            let sl_zoom = eframe::egui::Slider::new(&mut self.zoom_factor, 1.0..=MAX_ZOOM_FACROT)
+                .text("zoom");
             let sl_update_speed =
                 eframe::egui::Slider::new(&mut self.timeout, 10..=500).text("Update Speed");
             ui.add(slr);
@@ -199,6 +322,12 @@ impl eframe::App for ViewApp {
             if self.is_racoon {
                 ui.add(sl_speed);
             }
+
+            ui.add(zoom_cb);
+            if self.is_zoom {
+                ui.add(sl_zoom);
+            }
+
             ui.add(disco_cb);
             if self.is_disco {
                 if ui.add(sl_update_speed).changed() {
