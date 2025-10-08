@@ -1,11 +1,9 @@
 use nokhwa::*;
 
-use app::App;
 use eframe;
 use view_app::ViewApp;
 
 mod view_app;
-mod app;
 
 fn main() {
 
@@ -16,20 +14,11 @@ fn main() {
                 println!("{device}");
             }
     let options = eframe::NativeOptions::default();
-    let app= get_current_app(std::env::args().len());
-    let param = app;
+    let app= Box::new(ViewApp::default());
     eframe::run_native(
         "Racoon Camera",
         options,
-        Box::new(|_cc| param),
+        Box::new(|_cc| app),
     )
     .unwrap();
-}
-
-fn get_current_app(args: usize) -> Box<dyn eframe::App> {
-    if args == 2 {
-        Box::new(App::default())
-    } else {
-        Box::new(ViewApp::default())
-    }
 }

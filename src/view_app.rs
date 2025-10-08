@@ -4,6 +4,7 @@ use image::{
     imageops::{crop_imm, resize, FilterType},
     ImageBuffer, Pixel, Rgba,
 };
+use imageproc::{drawing::draw_hollow_rect_mut, rect::Rect};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -102,7 +103,7 @@ impl Default for ViewApp {
             disco_rgb,
             current_disco_rgb: image::Rgb([0, 0, 0]),
             rotate: 0.0,
-            zoom_factor: 1.0,
+            zoom_factor: 2.0,
             rotate_delta: 0.0,
             is_racoon: false,
             is_disco: false,
@@ -146,10 +147,7 @@ impl ViewApp {
         let scores_array: ArrayD<f32> = outputs[0].to_owned();
         let boxes_array: ArrayD<f32> = outputs[1].to_owned();
 
-        let scores_view = scores_array.view();
-        let boxes_view = boxes_array.view();
-
-        let scores_slice = scores_view.index_axis(Axis(0), 0);
+        let scores_slice = scores_array.index_axis(Axis(0), 0);
 
         let (i, score) = scores_slice
             .axis_iter(Axis(0))
@@ -158,7 +156,7 @@ impl ViewApp {
             .unwrap();
         let face_score = score[1];
         if face_score > CONFIDENCE_THRESHOLD {
-            let boxes_batch = boxes_view.index_axis(Axis(0), 0);
+            let boxes_batch = boxes_array.index_axis(Axis(0), 0);
             let box_coords = boxes_batch.index_axis(Axis(0), i);
 
             let x_min_norm = box_coords[0];
