@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.27.2"
+eframe = "0.33.3"
 nokhwa = { version = "0.10.4", features = ["input-native"] }
-rand = "0.8.5"
+rand = "0.9.2"
 virtualcam-rs = "0.1.0"
-image = "0.24.9"
-imageproc = "0.23.0"
+image = "0.25.9"
+imageproc = "0.25.0"
 onnxruntime = "0.0.14"
-ndarray = "0.16.1"
+ndarray = "0.17.1"
+fast_image_resize = "5.3.0"
+rayon = "1.11.0"
