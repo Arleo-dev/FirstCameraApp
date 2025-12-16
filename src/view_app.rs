@@ -47,7 +47,6 @@ pub struct ViewApp {
     ort_session: Session<'static>,
     previous_score: f32,
     previous_box: (f32, f32, f32, f32),
-    window_size: eframe::egui::Vec2,
 }
 
 impl Default for ViewApp {
@@ -379,11 +378,6 @@ impl eframe::App for ViewApp {
             self.rgb.channels_mut()[1] = g;
             self.rgb.channels_mut()[2] = b;
         });
-        let window_size = ctx.used_size();
-        if window_size != self.window_size {
-            self.window_size = window_size;
-            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(window_size));
-        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
