@@ -121,7 +121,6 @@ impl Default for ViewApp {
             ort_session,
             previous_score: 0.0,
             previous_box: (0.0, 0.0, 0.0, 0.0),
-            window_size: eframe::egui::Vec2::new(0.0, 0.0),
         }
     }
 }
