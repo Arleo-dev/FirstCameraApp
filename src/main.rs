@@ -1,6 +1,4 @@
 use nokhwa::*;
-
-use eframe::{self, egui::Vec2};
 use view_app::ViewApp;
 
 mod view_app;

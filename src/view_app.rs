@@ -1,12 +1,7 @@
 use eframe::{self, egui::Color32};
 use fast_image_resize::images::Image;
-use fast_image_resize::{IntoImageView, Resizer};
-use image::{
-    self,
-    imageops::{crop_imm, resize, FilterType},
-    ImageBuffer, Pixel, Rgba,
-};
-use imageproc::{drawing::draw_hollow_rect_mut, rect::Rect};
+use image::{self, ImageBuffer, Pixel};
+use imageproc::*;
 
 use nokhwa::{
     self,
@@ -19,7 +14,6 @@ use onnxruntime::{
     environment::Environment, session::Session, GraphOptimizationLevel, LoggingLevel,
 };
 use rand::Rng;
-use std::time::{self, Instant};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -42,7 +36,6 @@ pub struct ViewApp {
     is_zoom: bool,
     timeout: u64,
     timeout_sender: Sender<u64>,
-    image_pixels: Vec<u8>,
     ort_env: &'static Environment,
     ort_session: Session<'static>,
     previous_score: f32,
@@ -57,15 +50,15 @@ impl Default for ViewApp {
         let (timeout_sender, receive) = mpsc::channel();
         thread::spawn(move || {
             let mut timeout = timeout;
-            let mut rng_thread = rand::thread_rng();
+            let mut rng_thread = rand::rng();
             loop {
                 if let Ok(time) = receive.try_recv() {
                     timeout = time;
                 }
                 let mut rgb = image::Rgb([0, 0, 0]);
-                rgb.0[0] = rng_thread.gen_range(10..=200);
-                rgb.0[1] = rng_thread.gen_range(10..=200);
-                rgb.0[2] = rng_thread.gen_range(10..=200);
+                rgb.0[0] = rng_thread.random_range(10..=200);
+                rgb.0[1] = rng_thread.random_range(10..=200);
+                rgb.0[2] = rng_thread.random_range(10..=200);
                 let _ = data.send(rgb);
                 thread::sleep(std::time::Duration::from_millis(timeout));
             }
@@ -116,7 +109,6 @@ impl Default for ViewApp {
             is_zoom: false,
             timeout,
             timeout_sender,
-            image_pixels: Vec::new(),
             ort_env,
             ort_session,
             previous_score: 0.0,
