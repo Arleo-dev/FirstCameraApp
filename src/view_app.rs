@@ -383,7 +383,9 @@ impl eframe::App for ViewApp {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/on_exit_img.jpg", path.display());
         let img = image::open(path).unwrap().into_rgba8();
-        let pixels = self.get_pixels_from_img(img);
+        let resolution = self.camera.resolution();
+        let frame = ViewApp::get_resized_image(&img, resolution.width(), resolution.height());
+        let pixels = self.get_pixels_from_img(frame);
         let _ = self.virtual_camera.send(pixels);
     }
 }
