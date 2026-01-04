@@ -13,7 +13,7 @@ fn main() {
         println!("{device}");
     }
     let mut options = eframe::NativeOptions::default();
-    options.viewport = eframe::egui::ViewportBuilder::default().with_always_on_top().with_resizable(false);
+    options.viewport = eframe::egui::ViewportBuilder::default().with_always_on_top();
     let app = Box::new(ViewApp::default());
     eframe::run_native("Racoon Camera", options, Box::new(|_cc| Ok(app))).unwrap();
 }
