@@ -140,16 +140,16 @@ impl ViewApp {
             tensor[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
         }
 
-        let outputs = match self.ort_session.run(vec![tensor]) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("❌ ONNX inference failed: {:?}", e);
-                return frame;
-            }
+        let (scores_array, boxes_array): (ArrayD<f32>, ArrayD<f32>) = {
+            let outputs = match self.ort_session.run(vec![tensor]) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("❌ ONNX inference failed: {:?}", e);
+                    return frame;
+                }
+            };
+            (outputs[0].to_owned(), outputs[1].to_owned())
         };
-
-        let scores_array: ArrayD<f32> = outputs[0].to_owned();
-        let boxes_array: ArrayD<f32> = outputs[1].to_owned();
 
         let scores_slice = scores_array.index_axis(Axis(0), 0);
 
@@ -177,27 +177,12 @@ impl ViewApp {
         let x_max_norm = self.previous_box.2;
         let y_max_norm = self.previous_box.3;
 
-        let mut x = (x_min_norm * orig_w as f32) as i32;
-        let mut y = (y_min_norm * orig_h as f32) as i32;
-        let mut w = ((x_max_norm - x_min_norm) * orig_w as f32) as u32;
-        let mut h = ((y_max_norm - y_min_norm) * orig_h as f32) as u32;
-        let delta_y = (orig_h - h) / 2;
-        let delta_x = (orig_w - w) / 2;
-
-        let cx = x as f32 + w as f32 / 2.0;
-        let cy = y as f32 + h as f32 / 2.0;
-
-        let zoom = MAX_ZOOM_FACROT / (self.zoom_factor * 4f32);
-        w = (((w + delta_x) as f32) * zoom) as u32;
-        h = (((h + delta_y) as f32) * zoom) as u32;
-
-        x = (cx - w as f32 / 2.0).round() as i32;
-        y = (cy - h as f32 / 2.0).round() as i32;
-
-        let x = x.max(0) as u32;
-        let y = y.max(0) as u32;
-        let w = w.min(orig_w - x);
-        let h = h.min(orig_h - y);
+        let (x, y, w, h) = get_box_size_with_scale(
+            self.zoom_factor,
+            (x_min_norm, y_min_norm, x_max_norm, y_max_norm),
+            orig_w,
+            orig_h,
+        );
         // FOR DEBUG
         // let rect = Rect::at(x as i32, y as i32).of_size(w, h);
         // draw_hollow_rect_mut(&mut frame, rect, Rgba([0, 255, 0, 255]));
@@ -208,6 +193,7 @@ impl ViewApp {
         frame
     }
 
+    
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
         let rgb = if self.is_disco {
             if let Ok(rgb) = self.disco_rgb.try_recv() {
@@ -370,6 +356,38 @@ impl eframe::App for ViewApp {
         let _ = self.virtual_camera.send(pixels);
     }
 }
+
+fn get_box_size_with_scale(
+        zoom_factor: f32,
+        box_size: (f32, f32, f32, f32),
+        orig_w: u32,
+        orig_h: u32,
+    ) -> (u32, u32, u32, u32) {
+        let mut x = (box_size.0 * orig_w as f32) as i32;
+        let mut y = (box_size.1 * orig_h as f32) as i32;
+        let mut w = ((box_size.2 - box_size.0) * orig_w as f32) as u32;
+        let mut h = ((box_size.3 - box_size.1) * orig_h as f32) as u32;
+        let delta_y = (orig_h - h) / 2;
+        let delta_x = (orig_w - w) / 2;
+
+        let cx = x as f32 + w as f32 / 2.0;
+        let cy = y as f32 + h as f32 / 2.0;
+
+        let zoom = MAX_ZOOM_FACROT / (zoom_factor * 4f32);
+        w = (((w + delta_x) as f32) * zoom) as u32;
+        h = (((h + delta_y) as f32) * zoom) as u32;
+
+        x = (cx - w as f32 / 2.0).round() as i32;
+        y = (cy - h as f32 / 2.0).round() as i32;
+
+        let x = x.max(0) as u32;
+        let y = y.max(0) as u32;
+        let w = w.min(orig_w - x);
+        let h = h.min(orig_h - y);
+
+        (x, y, w, h)
+    }
+
 
 fn get_resized_image(
     image: &ImageBuffer<image::Rgba<u8>, Vec<u8>>,
