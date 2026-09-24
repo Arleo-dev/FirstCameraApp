@@ -1,11 +1,11 @@
 use eframe::{self, egui::Color32};
 use fast_image_resize::images::Image;
-use fast_image_resize::{IntoImageView, Resizer};
 use image::{
     self,
     imageops::{crop_imm, resize, FilterType},
     ImageBuffer, Pixel, Rgba,
 };
+use imageproc::geometric_transformations::Border;
 use imageproc::{drawing::draw_hollow_rect_mut, rect::Rect};
 
 use nokhwa::{
@@ -14,12 +14,11 @@ use nokhwa::{
     utils::{RequestedFormat, RequestedFormatType},
     Camera,
 };
-use onnxruntime::ndarray::*;
 use onnxruntime::{
     environment::Environment, session::Session, GraphOptimizationLevel, LoggingLevel,
 };
-use rand::Rng;
-use std::time::{self, Instant};
+use onnxruntime::{ndarray::*, session::SessionBuilder};
+use std::{sync::OnceLock, time::{self, Instant}};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -27,6 +26,17 @@ use std::{
 
 const MAX_ZOOM_FACROT: f32 = 10f32;
 const CONFIDENCE_THRESHOLD: f32 = 0.55;
+static ONNX_ENV: OnceLock<Environment> = OnceLock::new();
+
+fn get_onnx_env() -> &'static Environment {
+    ONNX_ENV.get_or_init(|| {
+        Environment::builder()
+            .with_name("face_detection")
+            .with_log_level(LoggingLevel::Warning)
+            .build()
+            .expect("Failed to create ONNX environment")
+    })
+}
 
 pub struct ViewApp {
     camera: nokhwa::Camera,
@@ -42,8 +52,6 @@ pub struct ViewApp {
     is_zoom: bool,
     timeout: u64,
     timeout_sender: Sender<u64>,
-    image_pixels: Vec<u8>,
-    ort_env: &'static Environment,
     ort_session: Session<'static>,
     previous_score: f32,
     previous_box: (f32, f32, f32, f32),
@@ -57,15 +65,14 @@ impl Default for ViewApp {
         let (timeout_sender, receive) = mpsc::channel();
         thread::spawn(move || {
             let mut timeout = timeout;
-            let mut rng_thread = rand::thread_rng();
             loop {
                 if let Ok(time) = receive.try_recv() {
                     timeout = time;
                 }
                 let mut rgb = image::Rgb([0, 0, 0]);
-                rgb.0[0] = rng_thread.gen_range(10..=200);
-                rgb.0[1] = rng_thread.gen_range(10..=200);
-                rgb.0[2] = rng_thread.gen_range(10..=200);
+                rgb.0[0] = rand::random_range(10..=200);
+                rgb.0[1] = rand::random_range(10..=200);
+                rgb.0[2] = rand::random_range(10..=200);
                 let _ = data.send(rgb);
                 thread::sleep(std::time::Duration::from_millis(timeout));
             }
@@ -78,20 +85,12 @@ impl Default for ViewApp {
 
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/version-RFB-640.onnx", path.display());
-        let env = Box::new(
-            Environment::builder()
-                .with_name("face_detection")
-                .with_log_level(LoggingLevel::Warning)
-                .build()
-                .expect("Failed to create ONNX environment"),
-        );
-        let ort_env: &'static Environment = Box::leak(env);
 
-        let session_builder = ort_env
+        let env = get_onnx_env();
+
+        let ort_session = env
             .new_session_builder()
-            .expect("Failed to create session builder");
-
-        let ort_session = session_builder
+            .expect("Failed to create ONNX session builder")
             .with_optimization_level(GraphOptimizationLevel::All)
             .expect("Failed to set optimization level")
             .with_model_from_file(path)
@@ -116,42 +115,14 @@ impl Default for ViewApp {
             is_zoom: false,
             timeout,
             timeout_sender,
-            image_pixels: Vec::new(),
-            ort_env,
             ort_session,
             previous_score: 0.0,
             previous_box: (0.0, 0.0, 0.0, 0.0),
-            window_size: eframe::egui::Vec2::new(0.0, 0.0),
         }
     }
 }
 
 impl ViewApp {
-    fn get_resized_image(
-        image: &ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-        resize_w: u32,
-        resize_h: u32,
-    ) -> ImageBuffer<image::Rgba<u8>, Vec<u8>> {
-        let orig_w = image.width();
-        let orig_h = image.height();
-        let mut resizer = fast_image_resize::Resizer::new();
-        let image_raw = image.as_raw();
-        let image = Image::from_vec_u8(
-            orig_w,
-            orig_h,
-            image_raw.clone(),
-            fast_image_resize::PixelType::U8x4,
-        )
-        .expect("Failed to create crop view");
-
-        let mut resized = Image::new(resize_w, resize_h, fast_image_resize::PixelType::U8x4);
-        resizer.resize(&image, &mut resized, None).unwrap();
-
-        let resized_frame: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_vec(resize_w, resize_h, resized.into_vec()).unwrap();
-        resized_frame
-    }
-
     fn get_zoomed_face(
         &mut self,
         mut frame: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
@@ -161,7 +132,7 @@ impl ViewApp {
         let model_h = 480;
         let model_w = 640;
 
-        let resized_frame = ViewApp::get_resized_image(&frame, model_w, model_h);
+        let resized_frame = get_resized_image(&frame, model_w, model_h);
         let mut tensor = Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
         for (x, y, pixel) in resized_frame.enumerate_pixels() {
             tensor[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
@@ -187,7 +158,9 @@ impl ViewApp {
             .enumerate()
             .max_by(|(_, x), (_, y)| x[1].partial_cmp(&y[1]).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap();
+
         let face_score = score[1];
+
         if (face_score - self.previous_score).abs() > 0.05 && face_score > CONFIDENCE_THRESHOLD {
             let boxes_batch = boxes_array.index_axis(Axis(0), 0);
             let box_coords = boxes_batch.index_axis(Axis(0), i);
@@ -230,7 +203,7 @@ impl ViewApp {
         // draw_hollow_rect_mut(&mut frame, rect, Rgba([0, 255, 0, 255]));
 
         let cropped_face = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
-        frame = ViewApp::get_resized_image(&cropped_face, orig_w, orig_h);
+        frame = get_resized_image(&cropped_face, orig_w, orig_h);
 
         frame
     }
@@ -260,7 +233,7 @@ impl ViewApp {
             &image,
             self.rotate,
             imageproc::geometric_transformations::Interpolation::Nearest,
-            image::Rgba([0, 0, 0, 255]),
+            Border::Constant(image::Rgba([0, 0, 0, 255])),
         );
 
         for x in 0..image.width() {
@@ -293,24 +266,31 @@ impl ViewApp {
     }
 
     fn set_camera_image(&mut self) {
-        let frame = self.camera.frame().unwrap();
+        match self.camera.frame() {
+            Ok(frame) => {
+                let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+                    frame.decode_image::<RgbAFormat>().unwrap();
 
-        let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-            frame.decode_image::<RgbAFormat>().unwrap();
+                if self.is_zoom {
+                    image = self.get_zoomed_face(image);
+                };
 
-        if self.is_zoom {
-            image = self.get_zoomed_face(image);
-        };
+                image = if self.is_racoon {
+                    self.get_racoon_style_image(image)
+                } else {
+                    self.get_color_effected_image(image)
+                };
 
-        image = if self.is_racoon {
-            self.get_racoon_style_image(image)
-        } else {
-            self.get_color_effected_image(image)
-        };
+                let pixels = self.get_pixels_from_img(image);
 
-        let pixels = self.get_pixels_from_img(image);
-
-        let _ = self.virtual_camera.send(pixels);
+                let _ = self.virtual_camera.send(pixels);
+            }
+            Err(e) => {
+                eprintln!("Dropped a frame or MSMF backend lagged: {:?}", e);
+                // Continue the loop or attempt to re-initialize if the error persists
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     fn get_pixels_from_img(&mut self, img: ImageBuffer<image::Rgba<u8>, Vec<u8>>) -> Vec<u8> {
@@ -328,10 +308,10 @@ impl ViewApp {
 }
 
 impl eframe::App for ViewApp {
-    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint();
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
+        ui.request_repaint();
 
-        eframe::egui::CentralPanel::default().show(ctx, |ui: &mut eframe::egui::Ui| {
+        eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
             self.set_camera_image();
             let mut r = self.rgb.channels_mut()[0];
             let mut g = self.rgb.channels_mut()[1];
@@ -380,11 +360,38 @@ impl eframe::App for ViewApp {
         });
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/on_exit_img.jpg", path.display());
-        let img = image::open(path).unwrap().into_rgba8();
+        let mut img = image::open(path).unwrap().into_rgba8();
+        let res = self.camera.resolution();
+        img = get_resized_image(&img, res.width(), res.height());
         let pixels = self.get_pixels_from_img(img);
         let _ = self.virtual_camera.send(pixels);
     }
+}
+
+fn get_resized_image(
+    image: &ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    resize_w: u32,
+    resize_h: u32,
+) -> ImageBuffer<image::Rgba<u8>, Vec<u8>> {
+    let orig_w = image.width();
+    let orig_h = image.height();
+    let mut resizer = fast_image_resize::Resizer::new();
+    let image_raw = image.as_raw();
+    let image = Image::from_vec_u8(
+        orig_w,
+        orig_h,
+        image_raw.clone(),
+        fast_image_resize::PixelType::U8x4,
+    )
+    .expect("Failed to create crop view");
+
+    let mut resized = Image::new(resize_w, resize_h, fast_image_resize::PixelType::U8x4);
+    resizer.resize(&image, &mut resized, None).unwrap();
+
+    let resized_frame: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_vec(resize_w, resize_h, resized.into_vec()).unwrap();
+    resized_frame
 }
