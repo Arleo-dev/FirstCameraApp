@@ -3,23 +3,6 @@
 version = 4
 
 [[package]]
-name = "FirstUIApp"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "fast_image_resize",
- "image",
- "imageproc",
- "ndarray 0.17.2",
- "nokhwa",
- "nokhwa-core",
- "onnxruntime",
- "rand 0.10.3",
- "rayon",
- "virtualcam-rs",
-]
-
-[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1454,6 +1437,23 @@ dependencies = [
  "rayon-core",
  "smallvec",
  "zune-inflate",
+]
+
+[[package]]
+name = "facecam"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "fast_image_resize",
+ "image",
+ "imageproc",
+ "ndarray 0.17.2",
+ "nokhwa",
+ "nokhwa-core",
+ "onnxruntime",
+ "rand 0.10.3",
+ "rayon",
+ "virtualcam-rs",
 ]
 
 [[package]]
