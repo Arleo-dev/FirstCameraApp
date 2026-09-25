@@ -336,24 +336,23 @@ impl eframe::App for ViewApp {
                 let sl_speed =
                     eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0).text("speed");
                 ui.add(sl_speed);
-            }else {
+            } else {
                 self.rotate = 0f32;
                 self.rotate_delta = 0f32;
             }
 
             ui.add(zoom_cb);
             if self.is_zoom {
-                let sl_zoom = eframe::egui::Slider::new(&mut self.zoom_factor, 1f32..=MAX_ZOOM_FACTOR)
-                .text("zoom");
+                let sl_zoom =
+                    eframe::egui::Slider::new(&mut self.zoom_factor, 1f32..=MAX_ZOOM_FACTOR)
+                        .text("zoom");
                 ui.add(sl_zoom);
             }
 
             ui.add(disco_cb);
             if self.is_disco {
-                
-            
-            let sl_update_speed =
-                eframe::egui::Slider::new(&mut self.timeout, 10..=500).text("Update Speed");
+                let sl_update_speed =
+                    eframe::egui::Slider::new(&mut self.timeout, 10..=500).text("Update Speed");
                 if ui.add(sl_update_speed).changed() {
                     let _ = self.timeout_sender.send(self.timeout);
                 }
