@@ -1,10 +1,6 @@
 use eframe::{self, egui::Color32};
 use fast_image_resize::images::Image;
-use image::{
-    self,
-    imageops::{crop_imm, resize, FilterType},
-    ImageBuffer, Pixel, Rgba,
-};
+use image::{self, ImageBuffer, Pixel, Rgba};
 use imageproc::geometric_transformations::Border;
 use imageproc::{drawing::draw_hollow_rect_mut, rect::Rect};
 
@@ -14,17 +10,18 @@ use nokhwa::{
     utils::{RequestedFormat, RequestedFormatType},
     Camera,
 };
+use onnxruntime::ndarray::*;
 use onnxruntime::{
     environment::Environment, session::Session, GraphOptimizationLevel, LoggingLevel,
 };
-use onnxruntime::{ndarray::*, session::SessionBuilder};
-use std::{sync::OnceLock, time::{self, Instant}};
+use std::cell::RefCell;
+use std::sync::OnceLock;
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 
-const MAX_ZOOM_FACROT: f32 = 10f32;
+const MAX_ZOOM_FACTOR: f32 = 10f32;
 const CONFIDENCE_THRESHOLD: f32 = 0.55;
 static ONNX_ENV: OnceLock<Environment> = OnceLock::new();
 
@@ -54,7 +51,8 @@ pub struct ViewApp {
     timeout_sender: Sender<u64>,
     ort_session: Session<'static>,
     previous_score: f32,
-    previous_box: (f32, f32, f32, f32),
+    previous_box: (u32, u32, u32, u32),
+    frame_count: u32,
 }
 
 impl Default for ViewApp {
@@ -91,8 +89,10 @@ impl Default for ViewApp {
         let ort_session = env
             .new_session_builder()
             .expect("Failed to create ONNX session builder")
-            .with_optimization_level(GraphOptimizationLevel::All)
+            .with_optimization_level(GraphOptimizationLevel::Extended)
             .expect("Failed to set optimization level")
+            .with_number_threads(4)
+            .expect("Failed to set threads count")
             .with_model_from_file(path)
             .expect("Failed to load ONNX model");
 
@@ -108,7 +108,7 @@ impl Default for ViewApp {
             disco_rgb,
             current_disco_rgb: image::Rgb([0, 0, 0]),
             rotate: 0.0,
-            zoom_factor: 2.0,
+            zoom_factor: 2f32,
             rotate_delta: 0.0,
             is_racoon: false,
             is_disco: false,
@@ -117,7 +117,8 @@ impl Default for ViewApp {
             timeout_sender,
             ort_session,
             previous_score: 0.0,
-            previous_box: (0.0, 0.0, 0.0, 0.0),
+            previous_box: (0, 0, 0, 0),
+            frame_count: 0,
         }
     }
 }
@@ -131,61 +132,75 @@ impl ViewApp {
         let orig_h = frame.height();
         let model_h = 480;
         let model_w = 640;
+        if self.frame_count % 5 == 0 {
+            let resized_frame = get_resized_image(&frame, model_w, model_h);
+            let mut tensor = Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
+            for (x, y, pixel) in resized_frame.enumerate_pixels() {
+                tensor[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
+                tensor[[0, 1, y as usize, x as usize]] = pixel[1] as f32 / 255.0;
+                tensor[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
+            }
 
-        let resized_frame = get_resized_image(&frame, model_w, model_h);
-        let mut tensor = Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
-        for (x, y, pixel) in resized_frame.enumerate_pixels() {
-            tensor[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
-            tensor[[0, 1, y as usize, x as usize]] = pixel[1] as f32 / 255.0;
-            tensor[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
-        }
-
-        let (scores_array, boxes_array): (ArrayD<f32>, ArrayD<f32>) = {
-            let outputs = match self.ort_session.run(vec![tensor]) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("❌ ONNX inference failed: {:?}", e);
-                    return frame;
-                }
+            let (scores_array, boxes_array): (ArrayD<f32>, ArrayD<f32>) = {
+                let outputs = match self.ort_session.run(vec![tensor]) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("❌ ONNX inference failed: {:?}", e);
+                        return frame;
+                    }
+                };
+                (outputs[0].to_owned(), outputs[1].to_owned())
             };
-            (outputs[0].to_owned(), outputs[1].to_owned())
-        };
 
-        let scores_slice = scores_array.index_axis(Axis(0), 0);
+            let scores_slice = scores_array.index_axis(Axis(0), 0);
 
-        let (i, score) = scores_slice
-            .axis_iter(Axis(0))
-            .enumerate()
-            .max_by(|(_, x), (_, y)| x[1].partial_cmp(&y[1]).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
+            let (i, score) = scores_slice
+                .axis_iter(Axis(0))
+                .enumerate()
+                .max_by(|(_, x), (_, y)| {
+                    x[1].partial_cmp(&y[1]).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap();
 
-        let face_score = score[1];
+            let face_score = score[1];
+            if face_score > CONFIDENCE_THRESHOLD {
+                let boxes_batch = boxes_array.index_axis(Axis(0), 0);
+                let box_coords = boxes_batch.index_axis(Axis(0), i);
+                self.previous_score = face_score;
+                let x_min_norm = box_coords[0];
+                let y_min_norm = box_coords[1];
+                let x_max_norm = box_coords[2];
+                let y_max_norm = box_coords[3];
 
-        if (face_score - self.previous_score).abs() > 0.05 && face_score > CONFIDENCE_THRESHOLD {
-            let boxes_batch = boxes_array.index_axis(Axis(0), 0);
-            let box_coords = boxes_batch.index_axis(Axis(0), i);
-            self.previous_score = face_score;
-            let x_min_norm = box_coords[0];
-            let y_min_norm = box_coords[1];
-            let x_max_norm = box_coords[2];
-            let y_max_norm = box_coords[3];
+                let (x, y, w, h) = get_box_size_with_scale(
+                    self.zoom_factor,
+                    (x_min_norm, y_min_norm, x_max_norm, y_max_norm),
+                    orig_w,
+                    orig_h,
+                );
 
-            self.previous_box = (x_min_norm, y_min_norm, x_max_norm, y_max_norm);
+                let a = ((x as i32 - self.previous_box.0 as i32).abs()) as u32;
+                let b = ((y as i32 - self.previous_box.1 as i32).abs()) as u32;
+
+                if self.previous_box == (0, 0, 0, 0)
+                    || a > self.previous_box.2 / 4
+                    || b > self.previous_box.3 / 4
+                    || (w < self.previous_box.2 && h < self.previous_box.3)
+                    || (w > self.previous_box.2 && h > self.previous_box.3)
+                {
+                    self.previous_box = (x, y, w, h);
+                }
+            }
         }
-        let x_min_norm = self.previous_box.0;
-        let y_min_norm = self.previous_box.1;
-        let x_max_norm = self.previous_box.2;
-        let y_max_norm = self.previous_box.3;
 
-        let (x, y, w, h) = get_box_size_with_scale(
-            self.zoom_factor,
-            (x_min_norm, y_min_norm, x_max_norm, y_max_norm),
-            orig_w,
-            orig_h,
-        );
+        let x = self.previous_box.0;
+        let y = self.previous_box.1;
+        let w = self.previous_box.2;
+        let h = self.previous_box.3;
+
         // FOR DEBUG
         // let rect = Rect::at(x as i32, y as i32).of_size(w, h);
-        // draw_hollow_rect_mut(&mut frame, rect, Rgba([0, 255, 0, 255]));
+        // draw_hollow_rect_mut(&mut frame, rect, Rgba([0, 255, 100, 255]));
 
         let cropped_face = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
         frame = get_resized_image(&cropped_face, orig_w, orig_h);
@@ -193,7 +208,6 @@ impl ViewApp {
         frame
     }
 
-    
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
         let rgb = if self.is_disco {
             if let Ok(rgb) = self.disco_rgb.try_recv() {
@@ -273,7 +287,6 @@ impl ViewApp {
             }
             Err(e) => {
                 eprintln!("Dropped a frame or MSMF backend lagged: {:?}", e);
-                // Continue the loop or attempt to re-initialize if the error persists
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -298,6 +311,7 @@ impl eframe::App for ViewApp {
         ui.request_repaint();
 
         eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
+            self.frame_count += 1;
             self.set_camera_image();
             let mut r = self.rgb.channels_mut()[0];
             let mut g = self.rgb.channels_mut()[1];
@@ -312,29 +326,34 @@ impl eframe::App for ViewApp {
                 .text("b")
                 .text_color(Color32::BLUE);
             let racoon_cb = eframe::egui::Checkbox::new(&mut self.is_racoon, "On Racoon");
-            let sl_speed =
-                eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0).text("speed");
             let disco_cb = eframe::egui::Checkbox::new(&mut self.is_disco, "On Disco");
             let zoom_cb = eframe::egui::Checkbox::new(&mut self.is_zoom, "On Zoom");
-            let sl_zoom = eframe::egui::Slider::new(&mut self.zoom_factor, 1.0..=MAX_ZOOM_FACROT)
-                .text("zoom");
-            let sl_update_speed =
-                eframe::egui::Slider::new(&mut self.timeout, 10..=500).text("Update Speed");
             ui.add(slr);
             ui.add(slg);
             ui.add(slb);
             ui.add(racoon_cb);
             if self.is_racoon {
+                let sl_speed =
+                    eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0).text("speed");
                 ui.add(sl_speed);
+            }else {
+                self.rotate = 0f32;
+                self.rotate_delta = 0f32;
             }
 
             ui.add(zoom_cb);
             if self.is_zoom {
+                let sl_zoom = eframe::egui::Slider::new(&mut self.zoom_factor, 1f32..=MAX_ZOOM_FACTOR)
+                .text("zoom");
                 ui.add(sl_zoom);
             }
 
             ui.add(disco_cb);
             if self.is_disco {
+                
+            
+            let sl_update_speed =
+                eframe::egui::Slider::new(&mut self.timeout, 10..=500).text("Update Speed");
                 if ui.add(sl_update_speed).changed() {
                     let _ = self.timeout_sender.send(self.timeout);
                 }
@@ -358,36 +377,32 @@ impl eframe::App for ViewApp {
 }
 
 fn get_box_size_with_scale(
-        zoom_factor: f32,
-        box_size: (f32, f32, f32, f32),
-        orig_w: u32,
-        orig_h: u32,
-    ) -> (u32, u32, u32, u32) {
-        let mut x = (box_size.0 * orig_w as f32) as i32;
-        let mut y = (box_size.1 * orig_h as f32) as i32;
-        let mut w = ((box_size.2 - box_size.0) * orig_w as f32) as u32;
-        let mut h = ((box_size.3 - box_size.1) * orig_h as f32) as u32;
-        let delta_y = (orig_h - h) / 2;
-        let delta_x = (orig_w - w) / 2;
+    zoom_factor: f32,
+    box_size: (f32, f32, f32, f32),
+    orig_w: u32,
+    orig_h: u32,
+) -> (u32, u32, u32, u32) {
+    let mut x = box_size.0 * orig_w as f32;
+    let mut y = box_size.1 * orig_h as f32;
+    let mut w = (box_size.2 - box_size.0) * orig_w as f32;
+    let mut h = (box_size.3 - box_size.1) * orig_h as f32;
 
-        let cx = x as f32 + w as f32 / 2.0;
-        let cy = y as f32 + h as f32 / 2.0;
+    let cx = x as f32 + w as f32 / 2.0;
+    let cy = y as f32 + h as f32 / 2.0;
 
-        let zoom = MAX_ZOOM_FACROT / (zoom_factor * 4f32);
-        w = (((w + delta_x) as f32) * zoom) as u32;
-        h = (((h + delta_y) as f32) * zoom) as u32;
+    w = orig_w as f32 / zoom_factor;
+    h = orig_h as f32 / zoom_factor;
 
-        x = (cx - w as f32 / 2.0).round() as i32;
-        y = (cy - h as f32 / 2.0).round() as i32;
+    x = (cx - w / 2.0).round();
+    y = (cy - h / 2.0).round();
 
-        let x = x.max(0) as u32;
-        let y = y.max(0) as u32;
-        let w = w.min(orig_w - x);
-        let h = h.min(orig_h - y);
+    let x = (x.round() as u32).max(0) as u32;
+    let y = (y.round() as u32).max(0) as u32;
+    let w = (w.round() as u32).min(orig_w - x);
+    let h = (h.round() as u32).min(orig_h - y);
 
-        (x, y, w, h)
-    }
-
+    (x, y, w, h)
+}
 
 fn get_resized_image(
     image: &ImageBuffer<image::Rgba<u8>, Vec<u8>>,

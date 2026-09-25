@@ -1,6 +1,6 @@
 use nokhwa::*;
 
-use eframe::{self, egui::{Vec2, accesskit::Size}};
+use eframe::{self};
 use view_app::ViewApp;
 
 mod view_app;
@@ -12,9 +12,12 @@ fn main() {
     for device in devices {
         println!("{device}");
     }
-    
+
     let mut options = eframe::NativeOptions::default();
-    options.viewport = eframe::egui::ViewportBuilder::default().with_always_on_top().with_resizable(false).with_inner_size(eframe::egui::Vec2::new(300f32, 250f32));
+    options.viewport = eframe::egui::ViewportBuilder::default()
+        .with_always_on_top()
+        .with_resizable(false)
+        .with_inner_size(eframe::egui::Vec2::new(300f32, 250f32));
     let app = Box::new(ViewApp::default());
     eframe::run_native("Racoon Camera", options, Box::new(|_cc| Ok(app))).unwrap();
 }
